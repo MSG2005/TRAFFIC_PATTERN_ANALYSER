@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Traffic Pattern Analyzer</title>
+  <!-- Bootstrap CSS for simple styling -->
+  <link
+    href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+    rel="stylesheet"
+  />
+  <!-- Chart.js for charts -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body {
+      background-color: #f5f5f5;
+    }
+    .card {
+      margin-bottom: 1rem;
+    }
+    .chart-container {
+      position: relative;
+      height: 400px;
+    }
+  </style>
+</head>
+<body>
+  <nav class="navbar navbar-dark bg-dark mb-4">
+    <div class="container-fluid">
+      <span class="navbar-brand mb-0 h1">Traffic Pattern Analyzer</span>
+    </div>
+  </nav>
+
+  <div class="container mb-4">
+    <!-- Filters -->
+    <div class="card">
+      <div class="card-body">
+        <h5 class="card-title">Select Road & Date</h5>
+        <div class="row g-3 align-items-end">
+          <div class="col-md-4">
+            <label for="roadSelect" class="form-label">Road</label>
+            <select id="roadSelect" class="form-select">
+              <option value="">Loading roads...</option>
+            </select>
+          </div>
+          <div class="col-md-3">
+            <label for="dateInput" class="form-label">Date</label>
+            <input
+              type="date"
+              id="dateInput"
+              class="form-control"
+            />
+          </div>
+          <div class="col-md-2">
+            <button id="loadTrafficBtn" class="btn btn-primary w-100">
+              Load Traffic
+            </button>
+          </div>
+        </div>
+        <small id="statusText" class="text-muted"></small>
+      </div>
+    </div>
+
+    <!-- Main content: chart + prediction + anomalies -->
+    <div class="row">
+      <div class="col-lg-8">
+        <div class="card">
+          <div class="card-body">
+            <h5 class="card-title">Traffic Volume (vehicle_count vs time)</h5>
+            <div class="chart-container">
+              <canvas id="trafficChart"></canvas>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-lg-4">
+        <!-- Prediction card -->
+        <div class="card mb-3">
+          <div class="card-body">
+            <h5 class="card-title">Predict Congestion</h5>
+            <div class="mb-2">
+              <label for="predictDatetime" class="form-label">
+                Select Date & Time
+              </label>
+              <input
+                type="datetime-local"
+                id="predictDatetime"
+                class="form-control"
+              />
+            </div>
+            <button id="predictBtn" class="btn btn-success w-100 mb-2">
+              Predict
+            </button>
+            <div id="predictResult" class="small"></div>
+          </div>
+        </div>
+
+        <!-- Anomalies card -->
+        <div class="card">
+          <div class="card-body">
+            <h5 class="card-title">Anomalies (Unusual High Traffic)</h5>
+            <div id="anomaliesContainer" class="small">
+              No data loaded yet.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // 🔧 Change this if your backend runs on a different port
+    const API_BASE = "http://127.0.0.1:8000";
+
+    const roadSelect = document.getElementById("roadSelect");
+    const dateInput = document.getElementById("dateInput");
+    const loadTrafficBtn = document.getElementById("loadTrafficBtn");
+    const statusText = document.getElementById("statusText");
+
+    const predictDatetimeInput = document.getElementById("predictDatetime");
+    const predictBtn = document.getElementById("predictBtn");
+    const predictResult = document.getElementById("predictResult");
+
+    const anomaliesContainer = document.getElementById("anomaliesContainer");
+
+    let trafficChart = null;
+
+    // ---------------- Load Roads on Page Load ----------------
+    async function loadRoads() {
+      try {
+        roadSelect.innerHTML = "<option>Loading...</option>";
+        const res = await fetch(`${API_BASE}/api/roads`);
+        if (!res.ok) throw new Error("Failed to fetch roads");
+        const data = await res.json();
+
+        roadSelect.innerHTML = "";
+        data.roads.forEach((road) => {
+          const opt = document.createElement("option");
+          opt.value = road.road_name;
+          opt.textContent = `${road.road_name} (ID: ${road.location_id})`;
+          roadSelect.appendChild(opt);
+        });
+
+        statusText.textContent = "Roads loaded.";
+      } catch (err) {
+        console.error(err);
+        roadSelect.innerHTML =
+          '<option value="">Error loading roads</option>';
+        statusText.textContent =
+          "Error loading roads. Check if backend is running.";
+      }
+    }
+
+    // ---------------- Load Traffic Data & Plot ----------------
+    async function loadTrafficData() {
+      const roadName = roadSelect.value;
+      const date = dateInput.value;
+
+      if (!roadName || !date) {
+        alert("Please select both road and date.");
+        return;
+      }
+
+      statusText.textContent = "Loading traffic data...";
+
+      try {
+        // Fetch traffic data
+        const res = await fetch(
+          `${API_BASE}/api/traffic?road_name=${encodeURIComponent(
+            roadName
+          )}&date=${date}`
+        );
+        if (!res.ok) {
+          throw new Error("Failed to fetch traffic data");
+        }
+        const json = await res.json();
+        const records = json.data;
+
+        if (!records || records.length === 0) {
+          statusText.textContent = "No traffic data for this day.";
+          renderChart([], [], "No data");
+          anomaliesContainer.textContent = "No data.";
+          return;
+        }
+
+        // Prepare data for chart
+        const labels = records.map((r) => {
+          const d = new Date(r.timestamp);
+          return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        });
+
+        const counts = records.map((r) => r.vehicle_count);
+
+        renderChart(labels, counts, `Traffic for ${roadName} on ${date}`);
+        statusText.textContent = `Loaded ${records.length} data points.`;
+
+        // Load anomalies for the same road & date
+        await loadAnomalies(roadName, date);
+      } catch (err) {
+        console.error(err);
+        statusText.textContent =
+          "Error loading traffic data. Check console / backend.";
+      }
+    }
+
+    // ---------------- Render Chart using Chart.js ----------------
+    function renderChart(labels, data, title) {
+      const ctx = document.getElementById("trafficChart").getContext("2d");
+
+      // Destroy old chart if it exists
+      if (trafficChart) {
+        trafficChart.destroy();
+      }
+
+      trafficChart = new Chart(ctx, {
+        type: "line",
+        data: {
+          labels: labels,
+          datasets: [
+            {
+              label: "Vehicle Count",
+              data: data,
+              borderWidth: 2,
+              tension: 0.3,
+            },
+          ],
+        },
+        options: {
+          responsive: true,
+          plugins: {
+            title: {
+              display: true,
+              text: title,
+            },
+            legend: {
+              display: true,
+            },
+          },
+          scales: {
+            x: {
+              title: {
+                display: true,
+                text: "Time",
+              },
+            },
+            y: {
+              title: {
+                display: true,
+                text: "Vehicle Count",
+              },
+              beginAtZero: true,
+            },
+          },
+        },
+      });
+    }
+
+    // ---------------- Load Anomalies ----------------
+    async function loadAnomalies(roadName, date) {
+      anomaliesContainer.textContent = "Loading anomalies...";
+
+      try {
+        const res = await fetch(
+          `${API_BASE}/api/anomalies?road_name=${encodeURIComponent(
+            roadName
+          )}&date=${date}`
+        );
+        if (!res.ok) {
+          anomaliesContainer.textContent = "No anomalies or error loading.";
+          return;
+        }
+
+        const json = await res.json();
+        const anomalies = json.anomalies;
+
+        if (!anomalies || anomalies.length === 0) {
+          anomaliesContainer.textContent = "No significant anomalies detected.";
+          return;
+        }
+
+        const list = document.createElement("ul");
+        list.className = "list-unstyled";
+
+        anomalies.forEach((a) => {
+          const li = document.createElement("li");
+          const d = new Date(a.timestamp);
+          const timeStr = d.toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+          });
+          li.textContent = `${timeStr} → vehicle_count = ${a.vehicle_count}, avg_speed = ${a.avg_speed}`;
+          list.appendChild(li);
+        });
+
+        anomaliesContainer.innerHTML = "";
+        anomaliesContainer.appendChild(list);
+      } catch (err) {
+        console.error(err);
+        anomaliesContainer.textContent =
+          "Error loading anomalies. Check console / backend.";
+      }
+    }
+
+    // ---------------- Predict Congestion ----------------
+    async function predictCongestion() {
+      const roadName = roadSelect.value;
+      const datetimeValue = predictDatetimeInput.value;
+
+      if (!roadName) {
+        alert("Please select a road first.");
+        return;
+      }
+      if (!datetimeValue) {
+        alert("Please select date & time for prediction.");
+        return;
+      }
+
+      // Convert datetime-local value to ISO string
+      const ts = new Date(datetimeValue);
+      const isoString = ts.toISOString();
+
+      predictResult.textContent = "Predicting...";
+
+      try {
+        const res = await fetch(`${API_BASE}/api/predict`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            road_name: roadName,
+            timestamp: isoString,
+          }),
+        });
+
+        if (!res.ok) {
+          throw new Error("Prediction request failed");
+        }
+
+        const data = await res.json();
+
+        predictResult.innerHTML = `
+          <strong>Predicted vehicle count:</strong> ${data.predicted_vehicle_count.toFixed(
+            1
+          )}<br/>
+          <strong>Congestion level:</strong> ${data.congestion_level}<br/>
+          <strong>Used features:</strong>
+          <pre>${JSON.stringify(data.used_features, null, 2)}</pre>
+        `;
+      } catch (err) {
+        console.error(err);
+        predictResult.textContent =
+          "Error predicting congestion. Check console / backend.";
+      }
+    }
+
+    // ---------------- Event Listeners ----------------
+    document.addEventListener("DOMContentLoaded", () => {
+      loadRoads();
+
+      // Default date to first date in dataset (e.g., 2024-01-01) if you want:
+      // dateInput.value = "2024-01-01";
+
+      loadTrafficBtn.addEventListener("click", loadTrafficData);
+      predictBtn.addEventListener("click", predictCongestion);
+    });
+  </script>
+</body>
+</html>
